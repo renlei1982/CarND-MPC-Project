@@ -90,7 +90,10 @@ int main() {
           double px = j[1]["x"];
           double py = j[1]["y"];
           double psi = j[1]["psi"];
+          double delta = j[1]["steering_angle"];
+          double a = j[1]["throttle"];
           double v = j[1]["speed"];
+          v = v * 0.447; //transform the mph into m/s
 
           /*
           * TODO: Calculate steering angle and throttle using MPC.
@@ -98,8 +101,59 @@ int main() {
           * Both are in between [-1, 1].
           *
           */
-          double steer_value;
-          double throttle_value;
+          // Implement the prediction for 100ms latency
+          // The new state after 100ms are predicted based on the current state as below
+          // And the new state value should be used for the coordination transform and poly fit
+          // Feed the new state to the mpc model
+          // The model will return the actuators for the new states of 100ms latency
+          double latency = 0.1;
+          double new_x = px + v * cos(psi) * latency;
+          double new_y = py + v * sin(psi) * latency;
+          double new_psi = psi - v * delta/2.67 * latency;
+          double new_v = v + a * latency;
+
+
+          // Setup the (x, y) point based on the car coordinate
+          Eigen::VectorXd car_ptsx(ptsx.size());
+          Eigen::VectorXd car_ptsy(ptsy.size());
+
+          // Then convert from global coordinates to car coordinates using the new state.
+          for (int i=0; i < ptsx.size(); i++) {
+            double x = ptsx[i] - new_x;
+            double y = ptsy[i] - new_y;
+
+            car_ptsx[i] = x * cos(-new_psi) - y * sin(-new_psi);
+            car_ptsy[i] = x * sin(-new_psi) + y * cos(-new_psi);
+          };
+
+
+          // Fit the poly line by order of 3
+          auto coeffs = polyfit(car_ptsx, car_ptsy, 3);
+
+          // Calculate CTE based on the poly fit coefficients
+          double cte = polyeval(coeffs, 0);
+
+          // Calculate epsi based on the poly fit coefficients
+          double epsi = - atan(coeffs[1]);
+
+
+          // Setup the initial state for the mpc model
+          Eigen::VectorXd state(6);
+
+          // In the car coordinate, the initial x, y and psi are all 0
+          state << 0, 0, 0, new_v, cte, epsi;
+
+          // Solve the mpc
+          auto vars = mpc.Solve(state, coeffs);
+
+
+          size_t N_ = 20;
+
+
+          // The steer_value and throttle_value to be sent to the server
+          // The steer_value was divide by deg2rad(25)
+          double steer_value = - vars[2 * N_]/deg2rad(25);
+          double throttle_value = vars[2 * N_ + 1];
 
           json msgJson;
           // NOTE: Remember to divide by deg2rad(25) before you send the steering value back.
@@ -107,9 +161,16 @@ int main() {
           msgJson["steering_angle"] = steer_value;
           msgJson["throttle"] = throttle_value;
 
-          //Display the MPC predicted trajectory 
-          vector<double> mpc_x_vals;
-          vector<double> mpc_y_vals;
+          //Display the MPC predicted trajectory
+
+          vector<double> mpc_x_vals(N_);
+          vector<double> mpc_y_vals(N_);
+
+          for (int i = 0; i < N_; i++){
+            mpc_x_vals[i] = vars[i];
+            mpc_y_vals[i] = vars[i + N_];
+          }
+
 
           //.. add (x,y) points to list here, points are in reference to the vehicle's coordinate system
           // the points in the simulator are connected by a Green line
@@ -118,8 +179,14 @@ int main() {
           msgJson["mpc_y"] = mpc_y_vals;
 
           //Display the waypoints/reference line
-          vector<double> next_x_vals;
-          vector<double> next_y_vals;
+          vector<double> next_x_vals(car_ptsx.size());
+          vector<double> next_y_vals(car_ptsy.size());
+
+          for (int i = 0; i < car_ptsx.size(); i++){
+            next_x_vals[i] = car_ptsx[i];
+            next_y_vals[i] = car_ptsy[i];
+          }
+
 
           //.. add (x,y) points to list here, points are in reference to the vehicle's coordinate system
           // the points in the simulator are connected by a Yellow line
